@@ -1,0 +1,166 @@
+#!/usr/bin/expect -f
+
+set prefix "\033\[1;31m>>>\033\[0m"
+
+proc usage {} {
+	regsub ".*/" $::argv0 "" name
+	send_user "please usage: $name user@host password\n"
+	exit 1
+}
+
+proc check_id_pub_file {} {
+  	if {![file exists $::id_file]} {
+		send_user "$::prefix id_rsa.pub is not found, try creating...\n"
+
+		if {[catch {spawn ssh-keygen -t rsa} error]} {
+			send_error "$::prefix $error\n"
+			exit 1
+		}
+		
+		expect -nocase -re "\(.*\):"
+		send -- "\r"
+		expect -nocase -re "passphrase.*:"
+		send -- "\r"
+		expect -nocase -re "passphrase.*again:"
+		send -- "\r"
+		expect eof
+		send_user "$::prefix id_rsa.pub create success\n"
+	}
+}
+
+proc remove_known_host_entry {host} {
+	regsub ".*/" $::argv0 "" name
+	set tmp_file "/tmp/$name.tmp"
+	set known_hosts "$::env(HOME)/.ssh/known_hosts"
+	send_user "$::prefix trying to remove '$host' from ~/.ssh/known_hosts...\n"
+
+	if {[catch {
+		set fd_known_hosts [open $known_hosts r]
+		set fd_tmp [open $tmp_file w]
+
+		while 1 {
+			gets $fd_known_hosts line
+			if [eof $fd_known_hosts] {
+				break
+			}
+
+			if [regexp "(\[^, ]+,)*${host}(,\[^, ]+)* " $line] {
+				continue
+			}
+
+			puts $fd_tmp $line
+		}
+		
+		close $fd_known_hosts
+		close $fd_tmp
+
+		file rename -force $tmp_file $known_hosts
+		send_user "remove '$host' from ~/.ssh/known_hosts success\n"	
+	} error]} {
+		send_user "$::prefix $error\n"
+		exit 1
+	}
+}
+
+# get user@host and password
+if {[llength $argv] != 2} {
+	usage
+}
+
+set user@host [lindex $argv 0]
+set password [lindex $argv 1]
+
+# create public key file if not found
+set id_file "$env(HOME)/.ssh/id_rsa.pub"
+check_id_pub_file
+
+# ssh user@host
+send_user "$prefix start ssh\n"
+set yes_no 0
+set ok_string success
+set tomeout 120
+set done 0
+
+while {!$done} {
+	spawn ssh ${user@host} echo $ok_string
+	expect {
+		-nocase -re "yes/no" {
+			send_user "$prefix ${user@host} start add known_hosts\n"
+			set yes_no 1
+			send -- "yes\r"
+			set done 1
+		}
+		-nocase -re "password: " {
+			send_user "$prefix ${user@host} known_hosts is added\n"
+			set done 1
+		}
+		$ok_string {
+			send_user "$prefix ${user@host} is aready autossh\n"
+			exit 0
+		}
+		"@@@@@@@@@@@@@@@@@@@@" {
+			expect eof
+			set indexofatsign [string first "@" ${user@host}]
+			incr indexofatsign
+			set hostname [string range ${user@host} $indexofatsign end]
+			remove_known_host_entry $hostname
+		}
+		eof {
+			send_error "$prefix failed\n"
+			exit 1
+		}
+		timeout {
+			send_error "$prefix timeour\n"
+			exit 1
+		}
+	}
+}
+
+if {$yes_no} {
+	expect {
+		$ok_string {
+			send_user "$prefix ok\n"
+			exit 0
+		}
+		-nocase -re "password: " {
+			send -- "$password\r"
+			expect {
+				-nocase "try again" {
+					send_error "$prefix password error\n"
+					exit 1
+				}
+				-nocase "passwrord: " {
+					send_error "$prefix password error\n"
+					exit 1
+				}
+				$ok_string {
+				}
+			}
+		}
+	}
+}
+
+# ssh finish
+send_user "$prefix ssh finish\n"
+expect eof
+
+# append public key to remote hosts ~/.ssh/authorized_keys
+send_user "$prefix append public key to ${user@host} ~/.ssh/authorized_keys\n"
+if {[catch {
+	set idfile [open $id_file RDONLY]
+	set pub_key [read $idfile]
+	close $idfile
+} error]} {
+	send_error "$prefix $error\n"
+	exit 1
+}
+
+set pub_key [string trimright $pub_key "\r\n"]
+spawn ssh ${user@host} "cd; mkdir -p .ssh 2> /dev/null; echo '$pub_key' >> .ssh/authorized_keys"
+expect -nocase -re "password:"
+send -- "$password\r"
+expect eof
+
+send_user "$prefix authenticating relation success\n"
+
+exit 0
